@@ -187,9 +187,23 @@
         alert("Lỗi: " + msg);
       });
 
-      // ===== RECEIVE SCREEN FRAMES =====
-      socket.on("screen-frame", (frameBase64) => {
-        screenImg.src = "data:image/jpeg;base64," + frameBase64;
+      // ===== RECEIVE SCREEN FRAMES (supports binary + base64) =====
+      let lastBlobUrl = null;
+      socket.on("screen-frame", (frameData) => {
+        // Revoke previous blob URL to prevent memory leak
+        if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+
+        if (frameData instanceof ArrayBuffer || frameData instanceof Uint8Array) {
+          // Binary frame (v2 optimized) → create blob URL
+          const blob = new Blob([frameData], { type: "image/jpeg" });
+          lastBlobUrl = URL.createObjectURL(blob);
+          screenImg.src = lastBlobUrl;
+        } else if (typeof frameData === "string") {
+          // Base64 frame (v1 fallback)
+          screenImg.src = "data:image/jpeg;base64," + frameData;
+          lastBlobUrl = null;
+        }
+
         screenImg.style.display = "block";
         placeholder.style.display = "none";
 
@@ -198,7 +212,9 @@
         const now = Date.now();
         if (now - lastFpsTime >= 1000) {
           fpsEl.textContent = frameCount + " FPS";
-          const sizeKB = Math.round(frameBase64.length * 0.75 / 1024);
+          const sizeKB = frameData.byteLength 
+            ? Math.round(frameData.byteLength / 1024) 
+            : Math.round(frameData.length * 0.75 / 1024);
           frameInfo.textContent = `Frame: ${sizeKB} KB`;
           frameCount = 0;
           lastFpsTime = now;
