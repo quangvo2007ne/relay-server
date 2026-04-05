@@ -14,7 +14,6 @@
       flex-direction: column;
     }
 
-    /* Top Bar */
     .top-bar {
       background: #161b22;
       padding: 10px 20px;
@@ -40,29 +39,17 @@
     }
     .top-bar input::placeholder { color: #484f58; letter-spacing: 1px; font-size: 13px; }
     .top-bar button {
-      background: #238636;
-      color: #fff;
-      border: none;
-      padding: 6px 18px;
-      border-radius: 6px;
-      cursor: pointer;
-      font-weight: 600;
-      font-size: 14px;
-      transition: background 0.2s;
+      background: #238636; color: #fff; border: none;
+      padding: 6px 18px; border-radius: 6px; cursor: pointer;
+      font-weight: 600; font-size: 14px; transition: background 0.2s;
     }
     .top-bar button:hover { background: #2ea043; }
-    .status {
-      padding: 4px 10px;
-      border-radius: 12px;
-      font-size: 12px;
-      font-weight: 600;
-    }
+    .status { padding: 4px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; }
     .status.off { background: #da3633; color: #fff; }
     .status.waiting { background: #d29922; color: #000; }
     .status.on { background: #238636; color: #fff; }
-    .info { margin-left: auto; font-size: 12px; color: #484f58; }
+    .info { margin-left: auto; font-size: 12px; color: #8b949e; font-family: monospace; }
 
-    /* Screen View */
     #screen-container {
       flex: 1;
       background: #000;
@@ -72,28 +59,27 @@
       position: relative;
       overflow: hidden;
     }
+    /* Video player thay thế img */
+    #screen-video {
+      max-width: 100%;
+      max-height: 100%;
+      cursor: crosshair;
+    }
+    /* Fallback img cho MJPEG */
     #screen-img {
       max-width: 100%;
       max-height: 100%;
       cursor: crosshair;
-      image-rendering: auto;
+      display: none;
     }
-    #placeholder {
-      text-align: center;
-      color: #484f58;
-    }
+    #placeholder { text-align: center; color: #484f58; }
     #placeholder .icon { font-size: 64px; margin-bottom: 10px; }
     #placeholder p { font-size: 14px; }
 
-    /* Click effect */
     .click-ring {
-      position: absolute;
-      width: 24px;
-      height: 24px;
-      border: 2px solid #58a6ff;
-      border-radius: 50%;
-      pointer-events: none;
-      transform: translate(-50%, -50%);
+      position: absolute; width: 24px; height: 24px;
+      border: 2px solid #58a6ff; border-radius: 50%;
+      pointer-events: none; transform: translate(-50%, -50%);
       animation: ring 0.5s ease-out forwards;
     }
     @keyframes ring {
@@ -101,17 +87,11 @@
       100% { transform: translate(-50%, -50%) scale(2.5); opacity: 0; }
     }
 
-    /* FPS counter */
     #fps {
-      position: absolute;
-      top: 8px;
-      right: 12px;
-      background: rgba(0,0,0,0.7);
-      color: #3fb950;
-      padding: 3px 8px;
-      border-radius: 4px;
-      font-family: monospace;
-      font-size: 12px;
+      position: absolute; top: 8px; right: 12px;
+      background: rgba(0,0,0,0.7); color: #3fb950;
+      padding: 3px 8px; border-radius: 4px;
+      font-family: monospace; font-size: 12px; z-index: 5;
     }
   </style>
 </head>
@@ -131,7 +111,8 @@
       <p>Nhập Room ID và nhấn Kết nối</p>
       <p style="margin-top:5px; font-size:12px;">Sau đó bạn sẽ thấy màn hình máy Host ở đây</p>
     </div>
-    <img id="screen-img" style="display:none;" alt="Remote Screen">
+    <video id="screen-video" style="display:none;" autoplay muted playsinline></video>
+    <img id="screen-img" alt="Remote Screen">
     <div id="fps"></div>
   </div>
 
@@ -140,6 +121,7 @@
     const roomInput = document.getElementById("room-input");
     const btnConnect = document.getElementById("btn-connect");
     const statusEl = document.getElementById("status");
+    const screenVideo = document.getElementById("screen-video");
     const screenImg = document.getElementById("screen-img");
     const placeholder = document.getElementById("placeholder");
     const fpsEl = document.getElementById("fps");
@@ -148,13 +130,97 @@
 
     let socket = null;
     let roomId = null;
-    let frameCount = 0;
+    let segmentCount = 0;
     let lastFpsTime = Date.now();
+    let totalBytes = 0;
 
-    // Get server URL (same origin when deployed, localhost for dev)
-    const SERVER_URL = window.location.origin;
+    // ===== MSE H.264 Player =====
+    let mediaSource = null;
+    let sourceBuffer = null;
+    let appendQueue = [];
+    let isH264Mode = false;
+
+    function initMSE() {
+      if (!window.MediaSource) {
+        console.warn("[MSE] Not supported, falling back to MJPEG");
+        return false;
+      }
+
+      mediaSource = new MediaSource();
+      screenVideo.src = URL.createObjectURL(mediaSource);
+
+      mediaSource.addEventListener("sourceopen", () => {
+        console.log("[MSE] Source opened");
+        try {
+          // H.264 Baseline Profile Level 3.1
+          sourceBuffer = mediaSource.addSourceBuffer('video/mp4; codecs="avc1.42E01F"');
+          sourceBuffer.mode = "segments";
+
+          sourceBuffer.addEventListener("updateend", () => {
+            // Append queued data
+            if (appendQueue.length > 0 && !sourceBuffer.updating) {
+              const next = appendQueue.shift();
+              try { sourceBuffer.appendBuffer(next); } catch(e) {}
+            }
+
+            // Trim old buffer to prevent memory growth (keep last 5 seconds)
+            try {
+              if (screenVideo.buffered.length > 0) {
+                const end = screenVideo.buffered.end(screenVideo.buffered.length - 1);
+                const start = screenVideo.buffered.start(0);
+                if (end - start > 8) {
+                  sourceBuffer.remove(start, end - 5);
+                }
+              }
+            } catch(e) {}
+          });
+
+          sourceBuffer.addEventListener("error", (e) => {
+            console.error("[MSE] SourceBuffer error:", e);
+          });
+
+        } catch(e) {
+          console.error("[MSE] addSourceBuffer failed:", e.message);
+          return;
+        }
+      });
+
+      mediaSource.addEventListener("sourceended", () => console.log("[MSE] Source ended"));
+      mediaSource.addEventListener("sourceclose", () => console.log("[MSE] Source closed"));
+
+      return true;
+    }
+
+    function appendToMSE(data) {
+      if (!sourceBuffer) return;
+
+      const uint8 = data instanceof Uint8Array ? data : new Uint8Array(data);
+
+      if (sourceBuffer.updating || appendQueue.length > 0) {
+        // Drop frames if queue is too long (prevent memory buildup)
+        if (appendQueue.length > 30) {
+          appendQueue.splice(0, appendQueue.length - 10); // Keep last 10
+        }
+        appendQueue.push(uint8);
+      } else {
+        try {
+          sourceBuffer.appendBuffer(uint8);
+        } catch(e) {
+          console.error("[MSE] append error:", e.message);
+        }
+      }
+
+      // Keep video at live edge (prevent growing delay)
+      if (screenVideo.buffered.length > 0) {
+        const liveEdge = screenVideo.buffered.end(screenVideo.buffered.length - 1);
+        if (liveEdge - screenVideo.currentTime > 1.5) {
+          screenVideo.currentTime = liveEdge - 0.3;
+        }
+      }
+    }
 
     // ===== CONNECT =====
+    const SERVER_URL = window.location.origin;
     btnConnect.addEventListener("click", connect);
     roomInput.addEventListener("keypress", (e) => { if (e.key === "Enter") connect(); });
 
@@ -167,6 +233,15 @@
 
       setStatus("waiting", "Đang kết nối...");
 
+      // Reset MSE
+      if (mediaSource) {
+        try { URL.revokeObjectURL(screenVideo.src); } catch(e) {}
+      }
+      appendQueue = [];
+      segmentCount = 0;
+      totalBytes = 0;
+      isH264Mode = false;
+
       socket = io(SERVER_URL, {
         transports: ["websocket", "polling"],
         reconnection: true,
@@ -178,58 +253,96 @@
       });
 
       socket.on("room-joined", () => {
-        console.log("[Room] Joined:", roomId);
         setStatus("on", "🟢 Đã kết nối");
       });
 
       socket.on("error-msg", (msg) => {
         setStatus("off", msg);
-        alert("Lỗi: " + msg);
       });
 
-      // ===== RECEIVE SCREEN FRAMES (supports binary + base64) =====
-      let lastBlobUrl = null;
-      socket.on("screen-frame", (frameData) => {
-        // Revoke previous blob URL to prevent memory leak
-        if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+      // ===== H.264 MODE: Init segment =====
+      socket.on("stream-init", (initData) => {
+        console.log("[H.264] Init segment received:", initData.byteLength || initData.length, "bytes");
+        isH264Mode = true;
 
-        if (frameData instanceof ArrayBuffer || frameData instanceof Uint8Array) {
-          // Binary frame (v2 optimized) → create blob URL
-          const blob = new Blob([frameData], { type: "image/jpeg" });
-          lastBlobUrl = URL.createObjectURL(blob);
-          screenImg.src = lastBlobUrl;
-        } else if (typeof frameData === "string") {
-          // Base64 frame (v1 fallback)
-          screenImg.src = "data:image/jpeg;base64," + frameData;
-          lastBlobUrl = null;
-        }
-
-        screenImg.style.display = "block";
+        // Show video, hide img
+        screenVideo.style.display = "block";
+        screenImg.style.display = "none";
         placeholder.style.display = "none";
 
-        // FPS counter
-        frameCount++;
+        // Setup MSE
+        initMSE();
+
+        // Wait for MSE to be ready, then append init segment
+        const checkReady = setInterval(() => {
+          if (sourceBuffer && !sourceBuffer.updating) {
+            clearInterval(checkReady);
+            try {
+              const data = initData instanceof Uint8Array ? initData :
+                           initData instanceof ArrayBuffer ? new Uint8Array(initData) :
+                           new Uint8Array(initData.buffer || initData);
+              sourceBuffer.appendBuffer(data);
+              console.log("[H.264] Init segment appended to MSE");
+              screenVideo.play().catch(() => {});
+            } catch(e) {
+              console.error("[H.264] Init append error:", e.message);
+            }
+          }
+        }, 50);
+      });
+
+      // ===== H.264 MODE: Media segments =====
+      socket.on("stream-data", (segmentData) => {
+        if (!isH264Mode) return;
+
+        const data = segmentData instanceof Uint8Array ? segmentData :
+                     segmentData instanceof ArrayBuffer ? new Uint8Array(segmentData) :
+                     new Uint8Array(segmentData.buffer || segmentData);
+
+        appendToMSE(data);
+        segmentCount++;
+        totalBytes += data.byteLength;
+
+        // FPS & stats counter
         const now = Date.now();
         if (now - lastFpsTime >= 1000) {
-          fpsEl.textContent = frameCount + " FPS";
-          const sizeKB = frameData.byteLength 
-            ? Math.round(frameData.byteLength / 1024) 
-            : Math.round(frameData.length * 0.75 / 1024);
-          frameInfo.textContent = `Frame: ${sizeKB} KB`;
-          frameCount = 0;
+          const fps = segmentCount;
+          const bw = Math.round(totalBytes / 1024);
+          fpsEl.textContent = fps + " FPS";
+          frameInfo.textContent = `${bw} KB/s`;
+          segmentCount = 0;
+          totalBytes = 0;
           lastFpsTime = now;
         }
       });
 
+      // ===== LEGACY MJPEG MODE =====
+      let lastBlobUrl = null;
+      socket.on("screen-frame", (frameData) => {
+        if (isH264Mode) return; // Ignore if H.264 active
+
+        if (lastBlobUrl) URL.revokeObjectURL(lastBlobUrl);
+        if (frameData instanceof ArrayBuffer || frameData instanceof Uint8Array) {
+          const blob = new Blob([frameData], { type: "image/jpeg" });
+          lastBlobUrl = URL.createObjectURL(blob);
+          screenImg.src = lastBlobUrl;
+        } else if (typeof frameData === "string") {
+          screenImg.src = "data:image/jpeg;base64," + frameData;
+          lastBlobUrl = null;
+        }
+        screenImg.style.display = "block";
+        screenVideo.style.display = "none";
+        placeholder.style.display = "none";
+      });
+
       socket.on("host-disconnected", () => {
         setStatus("off", "Host ngắt kết nối");
+        screenVideo.style.display = "none";
         screenImg.style.display = "none";
         placeholder.style.display = "block";
       });
 
-      socket.on("disconnect", () => {
-        setStatus("off", "Mất kết nối");
-      });
+      socket.on("disconnect", () => setStatus("off", "Mất kết nối"));
     }
 
     function setStatus(type, text) {
@@ -237,45 +350,37 @@
       statusEl.textContent = text;
     }
 
-    // ===== CLICK HANDLER =====
-    screenImg.addEventListener("click", (e) => {
+    // ===== CLICK HANDLER (works on both video and img) =====
+    function getClickTarget() {
+      return isH264Mode ? screenVideo : screenImg;
+    }
+
+    screenContainer.addEventListener("click", (e) => {
       if (!socket || !socket.connected) return;
+      const target = getClickTarget();
+      if (target.style.display === "none") return;
 
-      const rect = screenImg.getBoundingClientRect();
-      // Tính tỷ lệ click so với ảnh thật
-      const scaleX = screenImg.naturalWidth / rect.width;
-      const scaleY = screenImg.naturalHeight / rect.height;
-      const x = (e.clientX - rect.left) * scaleX;
-      const y = (e.clientY - rect.top) * scaleY;
+      const rect = target.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / rect.width;
+      const y = (e.clientY - rect.top) / rect.height;
+      if (x < 0 || x > 1 || y < 0 || y > 1) return;
 
-      // Gửi tọa độ (tương đối với màn hình gốc, server sẽ tính lại)
-      socket.emit("mouse-action", {
-        roomId,
-        action: {
-          type: "click",
-          // Gửi tỷ lệ 0-1 để Host tự tính theo resolution thật
-          x: (e.clientX - rect.left) / rect.width,
-          y: (e.clientY - rect.top) / rect.height,
-        },
-      });
-
-      // Visual feedback
+      socket.emit("mouse-action", { roomId, action: { type: "click", x, y } });
       showClickRing(e.clientX, e.clientY);
     });
 
-    screenImg.addEventListener("contextmenu", (e) => {
+    screenContainer.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       if (!socket || !socket.connected) return;
+      const target = getClickTarget();
+      if (target.style.display === "none") return;
 
-      const rect = screenImg.getBoundingClientRect();
-      socket.emit("mouse-action", {
-        roomId,
-        action: {
-          type: "rightclick",
-          x: (e.clientX - rect.left) / rect.width,
-          y: (e.clientY - rect.top) / rect.height,
-        },
-      });
+      const rect = target.getBoundingClientRect();
+      const x = (e.clientX - rect.left) / rect.width;
+      const y = (e.clientY - rect.top) / rect.height;
+      if (x < 0 || x > 1 || y < 0 || y > 1) return;
+
+      socket.emit("mouse-action", { roomId, action: { type: "rightclick", x, y } });
       showClickRing(e.clientX, e.clientY);
     });
 
