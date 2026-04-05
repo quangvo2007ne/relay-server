@@ -350,40 +350,65 @@
       statusEl.textContent = text;
     }
 
-    // ===== CLICK HANDLER =====
-    function handleClick(e, type) {
-      if (!socket || !socket.connected) return;
+    // ===== MOUSE CONTROL (Click + Move + Double Click) =====
+    function getCoords(e) {
       const target = isH264Mode ? screenVideo : screenImg;
-
       const rect = target.getBoundingClientRect();
       const x = (e.clientX - rect.left) / rect.width;
       const y = (e.clientY - rect.top) / rect.height;
-      if (x < 0 || x > 1 || y < 0 || y > 1) return;
-
-      console.log(`[Click] ${type} at (${x.toFixed(3)}, ${y.toFixed(3)}) → sending to host`);
-      socket.emit("mouse-action", { roomId, action: { type, x, y } });
-      showClickRing(e.clientX, e.clientY);
+      if (x < 0 || x > 1 || y < 0 || y > 1) return null;
+      return { x, y };
     }
 
-    // Click handler trực tiếp trên video
-    screenVideo.addEventListener("click", (e) => {
-      e.preventDefault();
-      handleClick(e, "click");
-    });
-    screenVideo.addEventListener("contextmenu", (e) => {
-      e.preventDefault();
-      handleClick(e, "rightclick");
-    });
+    function sendAction(type, coords) {
+      if (!socket || !socket.connected || !coords) return;
+      socket.emit("mouse-action", { roomId, action: { type, ...coords } });
+    }
 
-    // Click handler trên img (fallback MJPEG)
-    screenImg.addEventListener("click", (e) => {
+    // --- Mouse Move (throttled ~30/sec) ---
+    let lastMoveTime = 0;
+    function handleMouseMove(e) {
+      const now = Date.now();
+      if (now - lastMoveTime < 33) return; // Max ~30 moves/sec
+      lastMoveTime = now;
+      sendAction("mousemove", getCoords(e));
+    }
+
+    // --- Click ---
+    function handleClick(e) {
       e.preventDefault();
-      handleClick(e, "click");
-    });
-    screenImg.addEventListener("contextmenu", (e) => {
+      const coords = getCoords(e);
+      sendAction("click", coords);
+      if (coords) showClickRing(e.clientX, e.clientY);
+    }
+
+    // --- Double Click ---
+    function handleDblClick(e) {
       e.preventDefault();
-      handleClick(e, "rightclick");
-    });
+      const coords = getCoords(e);
+      sendAction("dblclick", coords);
+      if (coords) showClickRing(e.clientX, e.clientY);
+    }
+
+    // --- Right Click ---
+    function handleContextMenu(e) {
+      e.preventDefault();
+      const coords = getCoords(e);
+      sendAction("rightclick", coords);
+      if (coords) showClickRing(e.clientX, e.clientY);
+    }
+
+    // Attach to video
+    screenVideo.addEventListener("mousemove", handleMouseMove);
+    screenVideo.addEventListener("click", handleClick);
+    screenVideo.addEventListener("dblclick", handleDblClick);
+    screenVideo.addEventListener("contextmenu", handleContextMenu);
+
+    // Attach to img (MJPEG fallback)
+    screenImg.addEventListener("mousemove", handleMouseMove);
+    screenImg.addEventListener("click", handleClick);
+    screenImg.addEventListener("dblclick", handleDblClick);
+    screenImg.addEventListener("contextmenu", handleContextMenu);
 
     function showClickRing(clientX, clientY) {
       const ring = document.createElement("div");
